@@ -1,6 +1,19 @@
 # FloodWatch South India
 
-An independent, browser-based flood situational-awareness research prototype for South India, inspired by the public capabilities of Google Flood Hub.
+## Flood intelligence at basin scale
+
+South India's rivers can go from calm to catastrophic in hours, and the data needed to see it coming is scattered across a dozen agencies, portals and file formats. **FloodWatch unifies it into one real-time, map-led flood intelligence platform**, fusing live hydrometeorological telemetry, deep-learning discharge forecasting and satellite-derived flood history for the river basins of South India.
+
+### What FloodWatch does
+
+- **A self-computed 0.5° regional risk grid.** FloodWatch independently scores every grid cell from raw 24/72-hour rainfall forecasts, precipitation probability, current precipitation, GloFAS discharge percentiles and fresh gauge-history signals from nearby stations. No black-box feed: every score is calculated in-project, and missing data renders as *unknown*, never as safe.
+- **Deep-learning river forecasting.** A regional multi-station LSTM, trained on discharge records from **241 Central Water Commission (CWC) gauge stations across five states** and evaluated on **89,824 held-out forecast windows**, predicts seven-day discharge sequences from historical flows, observation masks, seasonal encoding and station geolocation. A validated LSTM/persistence blend beat the persistence baseline by 7.3% RMSE on chronological holdout, and a single-station discharge LSTM at Yadgir, Karnataka cut RMSE by 18.1% against persistence.
+- **A provenance-obsessed data pipeline.** Automated ingestion and normalization of CWC/NWDP discharge and water-level observations, gauge-catalog construction, gauge-to-basin assignment, unit harmonization, source-provenance validation and freshness auditing. Stale or unverifiable data is flagged as *risk unknown*, because in flood intelligence, old data is worse than no data.
+- **Multi-source sensor fusion.** Open-Meteo weather forecasts, GloFAS river-flow model output, live rain radar, GDACS cyclone-event overlays and NRSC/ISRO historical flood evidence (Andhra Pradesh hazard zonation and satellite-derived inundation mapping, 1998–2020) layered into a single operational picture.
+- **Infrastructure accountability tooling.** A browser-local evidence notebook for source-linked public records on reservoir operations, inspections, embankments and drainage maintenance, because floods are not only weather events, they are infrastructure events.
+- **Production-grade engineering.** A FastAPI backend serving paginated water-observation and model-status APIs, CI-driven model training and validation workflows, and deployment on **IBM LinuxONE** — built end-to-end for the IBM Z Datathon 2026.
+
+FloodWatch treats every number as a claim that must carry its source, its timestamp and its uncertainty. That is what separates situational awareness from a weather widget.
 
 ## Website
 
