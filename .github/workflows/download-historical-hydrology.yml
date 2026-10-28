@@ -1,0 +1,119 @@
+name: Download historical South India hydrology data
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install downloader dependencies
+        run: python -m pip install "requests>=2.31,<3" "beautifulsoup4>=4.12,<5"
+      - name: Download historical CWC discharge and rainfall CSVs
+        run: |
+          python data_pipeline/scripts/download_nwdp_history.py \
+            --source-url "https://nwdp.nwic.gov.in/dataset/river-discharge-manual-dailly-central-water-commission-cwc" \
+            --source-url "https://nwdp.nwic.gov.in/en/dataset/rainfall-manual-daily-central-water-commission-cwc" \
+            --keywords "andhra pradesh,karnataka,kerala,tamil nadu,telangana" \
+            --start-year 1950 --end-year 2025 \
+            --max-resources 20 \
+            --out-dir data_pipeline/raw/nwdp_history
+      - name: Inspect downloaded CSV schemas and sample rows
+        run: |
+          python data_pipeline/scripts/inspect_nwdp_archive.py \
+            --directory data_pipeline/raw/nwdp_history \
+            --out data_pipeline/raw/nwdp_history/inspection-report.json
+      - name: Confirm discharge targets were retrieved
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("data_pipeline/raw/nwdp_history/manifest.json").read_text(encoding="utf-8"))
+          files = manifest.get("files", [])
+          discharge = [item for item in files if "discharge" in str(item.get("title", "")).lower() and item.get("status") in {"downloaded", "already_downloaded"}]
+          print(f"Retrieved {len(files)} raw resources; {len(discharge)} discharge resources.")
+          if not discharge:
+              raise SystemExit("No historical discharge CSV was downloaded; inspect manifest.json and source-page errors.")
+          PY
+      - name: Test collision-safe CWC resource filenames
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_download_nwdp_history.py' -v
+      - name: Test discharge normalization safeguards
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_normalize_cwc_discharge.py' -v
+      - name: Test CWC station catalogue safeguards
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_build_cwc_station_catalog.py' -v
+      - name: Test station-level discharge audit
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_audit_cwc_discharge.py' -v
+      - name: Test CWC observation schema adapter
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_adapt_cwc_discharge_observations.py' -v
+      - name: Test CWC source provenance validator
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_validate_cwc_provenance.py' -v
+      - name: Test research-readiness review gates
+        run: python -m unittest discover -s data_pipeline/tests -p 'test_build_cwc_research_readiness.py' -v
+      - name: Normalize CWC discharge and produce quality report
+        run: |
+          python data_pipeline/scripts/normalize_cwc_discharge.py \
+            --input-dir data_pipeline/raw/nwdp_history \
+            --output data_pipeline/processed/cwc_discharge_normalized.csv \
+            --report data_pipeline/processed/cwc_discharge_quality_report.json
+      - name: Audit discharge gaps, duplicates and extremes by station
+        run: |
+          python data_pipeline/scripts/audit_cwc_discharge.py \
+            --input data_pipeline/processed/cwc_discharge_normalized.csv \
+            --output data_pipeline/processed/cwc_discharge_station_audit.json
+      - name: Validate exact resource URLs and raw checksums
+        run: |
+          python data_pipeline/scripts/validate_cwc_provenance.py \
+            --raw-dir data_pipeline/raw/nwdp_history \
+            --normalized data_pipeline/processed/cwc_discharge_normalized.csv \
+            --quality-report data_pipeline/processed/cwc_discharge_quality_report.json \
+            --manifest data_pipeline/raw/nwdp_history/manifest.json \
+            --out data_pipeline/processed/cwc_discharge_provenance_report.json \
+            --verify-raw-sha256
+      - name: Build station catalogue for manual review
+        run: |
+          python data_pipeline/scripts/build_cwc_station_catalog.py \
+            --input data_pipeline/processed/cwc_discharge_normalized.csv \
+            --output data_pipeline/processed/cwc_station_catalog_review.csv \
+            --report data_pipeline/processed/cwc_station_catalog_review.json
+      - name: Build station research-readiness review queue
+        run: |
+          python data_pipeline/scripts/build_cwc_research_readiness.py \
+            --catalog data_pipeline/processed/cwc_station_catalog_review.csv \
+            --audit data_pipeline/processed/cwc_discharge_station_audit.json \
+            --out-csv data_pipeline/processed/cwc_station_research_readiness.csv \
+            --out-json data_pipeline/processed/cwc_station_research_readiness.json
+      - name: Adapt discharge to common observations schema
+        run: |
+          python data_pipeline/scripts/adapt_cwc_discharge_observations.py \
+            --input data_pipeline/processed/cwc_discharge_normalized.csv \
+            --output data_pipeline/processed/cwc_discharge_observations.csv \
+            --report data_pipeline/processed/cwc_discharge_observations_report.json
+      - name: Upload raw sources, normalized data, and review reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: floodwatch-south-india-historical-hydrology
+          path: |
+            data_pipeline/raw/nwdp_history/
+            data_pipeline/processed/cwc_discharge_normalized.csv
+            data_pipeline/processed/cwc_discharge_quality_report.json
+            data_pipeline/processed/cwc_discharge_provenance_report.json
+            data_pipeline/processed/cwc_discharge_station_audit.json
+            data_pipeline/processed/cwc_station_catalog_review.csv
+            data_pipeline/processed/cwc_station_catalog_review.json
+            data_pipeline/processed/cwc_discharge_observations.csv
+            data_pipeline/processed/cwc_discharge_observations_report.json
+            data_pipeline/processed/cwc_station_research_readiness.csv
+            data_pipeline/processed/cwc_station_research_readiness.json
+          if-no-files-found: warn
+          retention-days: 7

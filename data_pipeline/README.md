@@ -1,0 +1,255 @@
+# FloodWatch historical-data pipeline
+
+This folder is the first reproducible data-ingestion and basin-mapping step for FloodWatch South India. It deliberately separates observations from modelled/reanalysis data. Nothing here should be described as a production flood forecast until a hydrology model has been trained and tested on suitable South Indian river data.
+
+## Verified source inventory
+
+| Source | What it provides | Historical range documented | How FloodWatch should use it |
+|---|---|---|---|
+| [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api) | ERA5 / ERA5-Land reanalysis at a coordinate | ERA5 from 1940; ERA5-Land from 1950; ERA5-Land is about 0.1° / 11 km | Consistent multi-decade weather context. These are reanalysis estimates, not direct rain-gauge readings. The fetch script defaults to ERA5-Land from 1950 and stops 7 days before today to avoid presenting delayed reanalysis as current. |
+| [NWDP/CWC hourly river-water-level telemetry archive](https://nwdp.nwic.gov.in/en/dataset/river-water-level-telemetry-hourly-central-water-commission-cwc) | CWC station-based water-level time series with station identifiers and geographic hierarchy | Portal lists river-group CSV resources for 1961–1990, 1991–2020 and newer periods; coverage varies by resource | Download the relevant South Indian river-group CSV, inspect actual rows, then normalize with the import script. A resource title is not proof every station has complete observations for the whole period. |
+| [NWDP/CWC daily river-discharge archive](https://nwdp.nwic.gov.in/dataset/river-discharge-manual-dailly-central-water-commission-cwc) | CWC daily observed discharge records by station | State-specific resources include 1950–2000 and 2001–2025 periods plus newer 2026–2030 resources; actual coverage varies | Primary target candidate for a local streamflow model. Inspect station continuity, discharge units, source schema and station IDs before normalization. |
+| [CWC Flood Forecasting System](https://ffs.india-water.gov.in/) | Official station and forecast context | Current portal | Verification/reference link; this pipeline does not scrape it or claim its display is a public API. |
+| [Google Flood Forecasting API documentation](https://developers.google.com/flood-forecasting) | Reference to historical data products and API access | GRRR river-discharge reanalysis/reforecast: 1980–2023; inundation history: 1999–2020 | Benchmark/comparison source if access and terms permit. Google says real-time API access requires approval and a key; don't assume API access is enabled. |
+| [HydroSHEDS HydroATLAS / HydroBASINS](https://www.hydrosheds.org/hydroatlas) | Basin polygons, river-network and catchment attributes | Static geospatial layers | Assign verified gauge coordinates to basin polygons. This is a first spatial mapping stage, not proof that two points are on the same connected river reach. |
+
+## What this pipeline creates
+
+1. Daily ERA5-Land weather rows at each verified gauge coordinate via fetch_historical_weather.py. This is point weather, not an area-weighted basin average.
+2. A normalized CWC gauge-level time-series format while preserving source station ID, timestamp, source file and units via normalize_cwc_levels.py.
+3. A GIS assignment from station coordinates to HydroBASINS polygons and candidate upstream basin relationships for selected sites via assign_gauges_to_basins.py. All proposed matches require channel/river and station metadata review.
+4. A source manifest and a data-quality report so missing intervals, duplicate timestamps, coordinates and provenance are visible.
+
+## Research LSTM training and inference
+
+**Fastest end-to-end neural-network experiment:** use the [Train FloodWatch discharge LSTM workflow](../.github/workflows/train-discharge-lstm.yml) to download the historical CWC/NWDP discharge archives, normalize them, train a discharge-only PyTorch LSTM for a selected station, compare it against a persistence baseline, and download the metrics/model artifact. The default station is Yadgir in the Krishna basin. See [the ML pilot guide](STREAMFLOW_ML_PILOT.md). This first version predicts daily maximum discharge from prior discharge only; it is not yet an operational flood forecast.
+
+Only train a single-gauge LSTM after the input tables have been verified and contain enough continuous **observed discharge** history. Do not use the public 407-record snapshot as a substitute for a curated historical daily discharge table; it mixes measurement types and timestamp quality.
+
+Install the optional ML dependencies:
+
+    python -m pip install -r data_pipeline/requirements-ml.txt
+
+Create a normalized daily feature table with `build_event_features.py` using source-reviewed station data and weather. The exact input schema is documented in that script. Then train a gauge-specific model:
+
+    python data_pipeline/scripts/train_streamflow_lstm.py --features path/to/features.csv --station-id VERIFIED_STATION_ID --output-dir data_pipeline/output/models
+
+The training report includes chronological train/validation/test periods, MAE/RMSE/NSE, and an out-of-time persistence baseline. If the LSTM does not beat the persistence baseline, do not promote it as a forecast model. A saved weight file alone is not evidence of skill.
+
+Before training, audit all stations in a feature table to see which ones meet minimum structural requirements:
+
+    python data_pipeline/scripts/assess_streamflow_readiness.py --features path/to/features.csv --out data_pipeline/output/streamflow-readiness.json
+
+This is a go/no-go screen for data continuity and chronological sample counts, not evidence that a station's units/provenance are correct or that a model will perform well.
+
+Before inference, run the review gate against the training report and the saved artifacts:
+
+    python data_pipeline/scripts/review_streamflow_model.py --report data_pipeline/output/models/streamflow_lstm_VERIFIED_STATION_ID.report.json --model data_pipeline/output/models/streamflow_lstm_VERIFIED_STATION_ID.pt --scalers data_pipeline/output/models/streamflow_lstm_VERIFIED_STATION_ID.scalers.npz --out data_pipeline/output/models/review-gate.json
+
+The gate rejects a model that fails the persistence benchmark or lacks artifacts/test metrics. Passing only makes the candidate **eligible for human review**; it never auto-deploys the model.
+
+For a model that has already been trained and reviewed, generate a research-only seven-day discharge output (the lead horizon and lookback must match the trained model):
+
+    python data_pipeline/scripts/predict_streamflow_lstm.py --features path/to/features.csv --station-id VERIFIED_STATION_ID --model data_pipeline/output/models/streamflow_lstm_VERIFIED_STATION_ID.pt --scalers data_pipeline/output/models/streamflow_lstm_VERIFIED_STATION_ID.scalers.npz --output data_pipeline/output/pilot_discharge_forecast.csv
+
+The inference script refuses incomplete recent history instead of silently filling missing observations. It writes a CSV and a metadata JSON that explicitly state the output is not validated for public warnings, does not include future weather forecasts, and is not a flood probability or inundation map. Model artifacts and raw station data are intentionally not committed to Git.
+
+## Downloading historical river records
+
+The official CWC telemetry portal currently lists historical archive resources for some South Indian river groups, including 1961–1990, 1991–2020, 2021–2025 and new 2026–2030 resources. The public portal's dataset metadata may be updated even when individual rows are missing or incomplete. Use the archive downloader to make a checksum-tracked local copy of the raw CSVs before analysis:
+
+    python -m pip install -r data_pipeline/requirements.txt
+    python data_pipeline/scripts/download_nwdp_history.py --out-dir data_pipeline/raw/nwdp_history --max-resources 100
+
+By default it searches the official CWC water-level telemetry, daily river-discharge, and daily rainfall dataset pages for South India state/basin resources across available historical periods. The portal lists older archive periods for daily discharge in Andhra Pradesh, Karnataka, Kerala, Tamil Nadu and Telangana, plus newer 2021–2025 and 2026–2030 resources; each file still requires inspection for actual station coverage and valid rows. It records the dataset page, each resource page, exact download URL, byte count and SHA-256 in a local `manifest.json`. Add other official NWDP dataset pages with repeated `--source-url` arguments. Raw archives are intentionally not committed to Git; they may be large and have their own metadata/usage conditions.
+
+You can also run this download from GitHub without installing Python locally: open [Download historical South India hydrology data](https://github.com/PantheonDeified/FloodWatch-South-India/actions/workflows/download-historical-hydrology.yml), select **Run workflow**, and download the `floodwatch-south-india-historical-hydrology` artifact when it completes. The artifact is temporary (7-day retention) and contains raw source files, checksums/URLs, and an `inspection-report.json` with headers and sample rows. It is not yet a cleaned model-training dataset.
+
+After downloading, inspect a specific file before deciding which columns and units to normalize:
+
+    python data_pipeline/scripts/inspect_cwc_csv.py --input data_pipeline/raw/nwdp_history/<file>.csv --date-column "Date"
+
+Do not use the source's advertised date-range title as a substitute for checking the actual first and last valid timestamps in its records. The downloader saves raw source files and provenance; it does not claim that all stations have 60 years of valid data.
+
+The normalizer reads `manifest.json` automatically when it is present in the
+input directory. For each downloaded CSV, it now preserves the exact NWDP
+resource page URL, direct download URL, parent dataset-page URL, resource title,
+and source-file SHA-256 in every normalized row and in the per-file quality
+report. Rows also carry `source_provenance_status`; `manifest_exact_resource`
+means an exact resource and download URL were found in the manifest, while
+`dataset_page_fallback` means the general dataset URL had to be used. Keep
+the raw manifest and the exact downloadable resources with the derived tables.
+The older archive artifact generated before this addition contains only the
+dataset-page URL; rerun the workflow to regenerate normalized outputs with the
+new provenance columns.
+
+See [the preliminary CWC discharge review summary](../docs/cwc-discharge-review.md) for the earlier run's station coverage and data-quality flags; those counts must be regenerated after the current provenance changes.
+
+The manual historical workflow now runs `validate_cwc_provenance.py` after
+normalization. It checks that each processed row's exact resource-page URL,
+download URL, parent dataset page, title and SHA-256 match the manifest entry
+for the raw file; it also recomputes raw file hashes before marking the check
+passed. The resulting `cwc_discharge_provenance_report.json` is included in the
+workflow artifact.
+
+The equivalent local command is:
+
+```bash
+python data_pipeline/scripts/validate_cwc_provenance.py --raw-dir data_pipeline/raw/nwdp_history --normalized data_pipeline/processed/cwc_discharge_normalized.csv --quality-report data_pipeline/processed/cwc_discharge_quality_report.json --manifest data_pipeline/raw/nwdp_history/manifest.json --out data_pipeline/processed/cwc_discharge_provenance_report.json --verify-raw-sha256
+``` A provenance pass confirms traceability/integrity only; it
+does not validate station identity, source measurement accuracy, coordinates,
+hydrological suitability or model skill.
+
+
+
+## Run locally
+
+Python 3.10+ is recommended.
+
+    python -m pip install -r data_pipeline/requirements.txt
+
+Create a copy of the template and fill it only with station coordinates confirmed from an official station record or verified official dataset:
+
+    cp data_pipeline/gauge_catalog.template.csv data_pipeline/gauge_catalog.csv
+
+Fetch ERA5-Land daily weather, chunked into five-year requests:
+
+    python data_pipeline/scripts/fetch_historical_weather.py --gauges data_pipeline/gauge_catalog.csv --out data_pipeline/output/historical_weather_daily.csv --start 1950-01-01
+
+Inspect an official CWC CSV after downloading it from the NWDP portal:
+
+    python data_pipeline/scripts/inspect_cwc_csv.py --input path/to/downloaded_cwc.csv
+
+Normalize it after confirming the exact column names and units from that file:
+
+    python data_pipeline/scripts/normalize_cwc_levels.py --input path/to/downloaded_cwc.csv --output data_pipeline/output/cwc_water_levels.csv --station-column station_id --time-column date --level-column water_level --unit m --source-url "PASTE THE OFFICIAL NWDP RESOURCE URL"
+
+The example column names above are examples only: actual source CSV columns can vary. Inspect the file before running the normalizer. The normalizer never converts water level to discharge.
+
+Assign gauges to downloaded HydroBASINS polygons (GeoJSON, Shapefile or GeoPackage):
+
+    python data_pipeline/scripts/assign_gauges_to_basins.py --gauges data_pipeline/gauge_catalog.csv --basins path/to/HydroBASINS.gpkg --out data_pipeline/output/gauge_basin_assignments.csv
+
+For site-to-gauge candidates, provide a separate CSV with columns target_id, latitude and longitude:
+
+    python data_pipeline/scripts/assign_gauges_to_basins.py --gauges data_pipeline/gauge_catalog.csv --basins path/to/HydroBASINS.gpkg --targets data_pipeline/sites.csv --out data_pipeline/output/gauge_basin_assignments.csv
+
+The basin layer must contain HydroBASINS-style HYBAS_ID and NEXT_DOWN fields (the script also accepts case-insensitive field names). The script reports whether a station falls in the same sub-basin or a hydrologically upstream sub-basin whose NEXT_DOWN chain drains into the target basin. It marks all results as candidates requiring manual channel/connectivity validation. It does not automatically select the geographically nearest gauge and call it hydrologically relevant.
+
+## Data-quality rules
+
+- Keep station water level (usually a height relative to a local gauge datum) separate from discharge (volume per time, such as m³/s). A rating curve and its validity period are needed to convert between them; never infer discharge from water level alone.
+- Never fill observation gaps with zero. Blank/missing values remain missing.
+- Preserve source URL, retrieval time, raw station ID, units, and timestamp timezone/semantics.
+- A gauge coordinate must have a provenance field and verification status. Do not place guessed points into the station catalogue.
+- Reanalysis rainfall at a gauge coordinate is not the same as rain measured at that gauge and is not a basin-average precipitation estimate.
+- Check actual minimum/maximum dates and missingness in each CSV; do not trust period labels alone.
+- Baseline comparisons should state their period (for example 1991–2020). All-record extremes should use only complete rolling windows and identify the date.
+- Any candidate basin/gauge pairing must be checked against river name, station metadata, flow direction, dam/diversion context and gauge datum before hydrology modelling.
+
+## Why we are not training a Google-style model yet
+
+The published OpenHydroNet implementation uses streamflow as the prediction target. CWC hourly water-level CSVs are not automatically streamflow records. To adapt an LSTM appropriately we need suitable discharge observations (or approved station rating curves with valid periods), verified basin attributes and meteorological forcing data aligned to each gauge. The production-like configuration also uses multiple forcing products; not all operational input feeds are necessarily freely reusable in the same way. The code is a research/engineering starting point, not a ready-made South India model.
+
+See [MODEL_ADAPTATION.md](../MODEL_ADAPTATION.md) for the evaluation plan.
+
+
+## Historical CWC station catalogue review (added 2026-10-18)
+
+The historical NWDP download currently normalizes daily discharge into
+`data_pipeline/processed/cwc_discharge_normalized.csv`. The pipeline can now
+build a station inventory from that normalized file:
+
+```bash
+python data_pipeline/scripts/build_cwc_station_catalog.py \
+  --input data_pipeline/processed/cwc_discharge_normalized.csv \
+  --output data_pipeline/processed/cwc_station_catalog_review.csv \
+  --report data_pipeline/processed/cwc_station_catalog_review.json
+```
+
+The catalogue summarizes each station's state, river/basin labels, reported
+coordinates, number of records, observed date range and source URLs. It flags
+conflicting coordinates for the same station name/state and invalid coordinate
+ranges. Crucially, every station is emitted with `coordinate_verified=false`
+and a blank `coordinate_source_url`. Coordinates appearing in a source CSV
+are not automatically treated as independently verified, so these rows must
+not be fed into the weather-fetch or basin-mapping scripts until a reviewer
+checks the location against a reliable source and records that source URL.
+
+The `Download historical South India hydrology data` GitHub Actions workflow
+runs unit tests for both discharge normalization and station-catalogue
+guardrails, creates the catalogue, and attaches it to the
+`floodwatch-south-india-historical-hydrology` artifact. Run it manually from
+the repository's Actions tab. The artifact expires after seven days, so
+download and retain the review CSV/report if needed.
+
+## Current evidence vs. next gate
+
+The 2026-10-18 successful run retrieved 10 NWDP resources, normalized
+1,876,509 rows from 1,876,539 input rows, rejected 30 negative discharge
+values, and represented 241 station IDs across Andhra Pradesh, Karnataka,
+Kerala, Tamil Nadu and Telangana (source date range 1965-01-01 to
+2025-12-31). This confirms ingestion and basic normalization, not complete
+station continuity, validated station coordinates, rainfall/discharge
+alignment, or forecast skill.
+
+Next gates, in order:
+1. Review the station catalogue and verify coordinates/provenance manually.
+2. Inspect data quality by station: timestamp duplicates, gaps, record frequency,
+   plausible extremes and station identity changes.
+3. Obtain/normalize suitable rainfall observations or document the limitations
+   of gridded reanalysis; align rainfall to verified gauge coordinates/basins.
+4. Build a station-specific daily feature table only after the above checks.
+5. Train a research-only baseline and LSTM using chronological splits; keep
+   flood-event labels and independent evaluation separate from discharge prediction.
+
+
+## Common observations schema adapter
+
+The workflow now also exports `data_pipeline/processed/cwc_discharge_observations.csv`
+and a small conversion report. The adapter maps the source's daily discharge
+field to `kind=river_discharge`, `value`, and `unit=m3/s`, preserving the
+station ID, timestamp, source URL/file and the source's unspecified timezone.
+This makes the discharge table compatible with the observation-table interface
+used by `build_event_features.py`.
+
+This is only a schema conversion. It does not verify source measurements,
+coordinates, station identity, or timezone. Do not build model features until
+station coordinates are reviewed and a weather table exists for those verified
+stations. The current catalogue intentionally marks all stations unverified,
+so the historical weather fetcher should continue to refuse them until a
+human reviewer records a reliable coordinate source URL.
+
+## Station research-readiness review queue
+
+The historical-hydrology workflow now joins the station catalogue to the per-station
+discharge audit and exports a sortable review queue:
+
+- `data_pipeline/processed/cwc_station_research_readiness.csv`
+- `data_pipeline/processed/cwc_station_research_readiness.json`
+
+Run it locally after building the catalogue and audit:
+
+```bash
+python data_pipeline/scripts/build_cwc_research_readiness.py \
+  --catalog data_pipeline/processed/cwc_station_catalog_review.csv \
+  --audit data_pipeline/processed/cwc_discharge_station_audit.json \
+  --out-csv data_pipeline/processed/cwc_station_research_readiness.csv \
+  --out-json data_pipeline/processed/cwc_station_research_readiness.json
+```
+
+The default triage thresholds are at least 365 calendar days of span, at least
+180 unique observation dates, and at least 75% calendar-date coverage. They are
+transparent screening defaults, not validated hydrological thresholds, and can
+be changed with `--min-span-days`, `--min-unique-dates`, and
+`--min-coverage`. Stations with metadata conflicts, quality flags, short
+history, or low coverage are not given the highest review priority.
+
+**A priority rank does not mean the station is verified or model-ready.**
+The pipeline only allows coordinate-based weather joins when
+`coordinate_verified=true` and `coordinate_source_url` is non-empty.
+Because the generated catalogue intentionally sets all stations to unverified,
+the current workflow should report zero stations allowed for weather joins.
+A reviewer must validate station identity and coordinates from a reliable source
+before updating a reviewed catalogue; passing this structural screen still does
+not establish data accuracy or forecast skill.

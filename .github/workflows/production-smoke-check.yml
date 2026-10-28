@@ -1,0 +1,359 @@
+name: FloodWatch deployed-site smoke checks
+
+on:
+  push:
+    paths:
+      - '.github/workflows/production-smoke-check.yml'
+      - 'index.html'
+      - 'data/water-observations.json'
+  workflow_dispatch:
+    inputs:
+      backend_base_url:
+        description: "Optional current HTTPS Cloudflare Quick Tunnel URL for backend API checks"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  deployed-smoke-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check deployed website and public data snapshot
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import json
+          import pathlib
+          import re
+          import subprocess
+          import tempfile
+          import time
+          import urllib.parse
+          import urllib.request
+
+          checks = [
+              ("site", "https://pantheondeified.github.io/FloodWatch-South-India/"),
+              ("water_snapshot", "https://raw.githubusercontent.com/PantheonDeified/FloodWatch-South-India/main/data/water-observations.json"),
+          ]
+          responses = {}
+          # Pages deployment and this smoke-check workflow start on the same push.
+          # Retry the page fetch until the new commit is actually visible via GitHub Pages/CDN.
+          expected_markers = (
+              "FloodWatch", "leaflet", "water-observations.json",
+              'data-overlay="rain"', 'data-overlay="cloud"',
+              'data-overlay="wind"', 'data-overlay="nasa-imerg"', 'data-overlay="cyclone"',
+              "ERA5-Land", "waterRows", "dischargeInterpretation", "hourly",
+              "riskLayer", "riskMapLegend", "setRiskMapLayer", "setComputedRiskGrid", "FLOODWATCH_RISK_GRID", "fw-risk-contours-20261018-v1", "flood-api.open-meteo.com", "NRSC_HAZARD_WMS",
+              "agg_karnataka", "agg_kerala", "agg_tamilnadu", "loadCyclones",
+              "addRiskCycloneThreat", "buildRiskContourField", "buildRiskContourPolylines", "basinRoutingRelation", "loadSouthIndiaBasins", "checkOfficialFeeds", 'id="regionalMlStatus"', 'id="ibmZDatathonBanner"', "infraEvidenceForm", "initInfrastructureRegister",
+              "floodwatch.infrastructureEvidence.v1", "cwc.gov.in/national-register-large-dams",
+              "sachet.ndma.gov.in",
+          )
+          for name, url in checks:
+              max_attempts = 10 if name == "site" else 1
+              for attempt in range(1, max_attempts + 1):
+                  fetch_url = url
+                  if name == "site":
+                      separator = "&" if "?" in url else "?"
+                      fetch_url = url + separator + urllib.parse.urlencode({
+                          "floodwatch_commit": __import__("os").environ.get("GITHUB_SHA", ""),
+                          "attempt": attempt,
+                      })
+                  request = urllib.request.Request(
+                      fetch_url, headers={"User-Agent": "FloodWatch-smoke-check/1.0", "Accept": "*/*", "Cache-Control": "no-cache"}
+                  )
+                  try:
+                      with urllib.request.urlopen(request, timeout=20) as response:
+                          body = response.read()
+                          status = response.status
+                          content_type = response.headers.get("Content-Type", "")
+                      if status != 200:
+                          raise SystemExit(f"{name}: expected HTTP 200, got {status}")
+                      if name == "site":
+                          candidate = body.decode("utf-8", errors="replace").casefold()
+                          missing = [m for m in expected_markers if m.casefold() not in candidate]
+                          if missing and attempt < max_attempts:
+                              print(f"WAIT Pages/CDN has not published latest markers yet: {missing[:4]}; retry {attempt}/{max_attempts}")
+                              time.sleep(8)
+                              continue
+                          if missing:
+                              raise SystemExit(f"Deployed page is missing expected markers after retries: {missing}")
+                      responses[name] = (body, content_type)
+                      print(f"PASS {name}: HTTP {status}, {len(body)} bytes, {content_type}")
+                      break
+                  except Exception as exc:
+                      if name == "site" and attempt < max_attempts:
+                          print(f"WAIT site fetch attempt {attempt}/{max_attempts} failed: {exc}")
+                          time.sleep(8)
+                          continue
+                      raise
+
+          html = responses["site"][0].decode("utf-8", errors="replace")
+          print("PASS deployed page contains all previous feature markers and new risk-map markers")
+
+          # Parse every inline JavaScript block with the runner's Node.js parser.
+          scripts = re.findall(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", html, flags=re.I | re.S)
+          if not scripts:
+              raise SystemExit("No inline JavaScript blocks found to validate.")
+          for index, script in enumerate(scripts, start=1):
+              temp_path = None
+              try:
+                  with tempfile.NamedTemporaryFile(mode="w", suffix=".js", encoding="utf-8", delete=False) as temp:
+                      temp.write(script)
+                      temp_path = pathlib.Path(temp.name)
+                  check = subprocess.run(["node", "--check", str(temp_path)], capture_output=True, text=True)
+                  if check.returncode:
+                      raise SystemExit(f"Inline JavaScript block {index} failed syntax check:\\n{check.stderr}")
+              finally:
+                  if temp_path is not None:
+                      temp_path.unlink(missing_ok=True)
+          print(f"PASS Node.js syntax check for {len(scripts)} inline JavaScript block(s)")
+
+          payload = json.loads(responses["water_snapshot"][0].decode("utf-8"))
+          if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
+              raise SystemExit("Water snapshot schema invalid: expected object with observations array")
+          if not payload["observations"]:
+              raise SystemExit("Water snapshot has zero observations; refusing a silent empty-data pass")
+          generated = payload.get("generated_at_utc")
+          if not generated:
+              raise SystemExit("Water snapshot is missing generated_at_utc")
+          stamp = dt.datetime.fromisoformat(str(generated).replace("Z", "+00:00"))
+          if stamp.tzinfo is None:
+              raise SystemExit("generated_at_utc must include an explicit timezone")
+          age_hours = (dt.datetime.now(dt.timezone.utc) - stamp.astimezone(dt.timezone.utc)).total_seconds() / 3600
+          print(f"PASS water snapshot: {len(payload['observations'])} records, generated {generated}, age={age_hours:.1f}h")
+          if age_hours > 36:
+              raise SystemExit(f"Water snapshot is too old ({age_hours:.1f}h > 36h)")
+          if age_hours < -1:
+              raise SystemExit(f"Water snapshot generation time is unexpectedly in the future ({age_hours:.1f}h)")
+          PY
+
+      - name: Discover official NRSC historical flood hazard map services
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          sources = [
+              ("NRSC state flood-hazard map cache", "https://bhuvan-ras2.nrsc.gov.in/mapcache"),
+              ("NRSC historic flood hazard (1998–2007)", "https://bhuvan-ras2.nrsc.gov.in/cgi-bin/hazard.exe"),
+              ("NRSC historic flood annual layers (1999–2010)", "https://bhuvan-ras2.nrsc.gov.in/cgi-bin/flood.exe"),
+          ]
+          for label, base in sources:
+              url = base + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities"
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": "FloodWatch-source-discovery/1.0"})
+                  with urllib.request.urlopen(req, timeout=18) as response:
+                      raw = response.read()
+                      print(f"SERVICE {label}: HTTP {response.status}, {len(raw)} bytes")
+                  root = ET.fromstring(raw)
+                  local_name = lambda tag: tag.rsplit("}", 1)[-1].split(":")[-1]
+                  layer_nodes = [node for node in root.iter() if local_name(node.tag) == "Layer"]
+                  layers = []
+                  for layer in layer_nodes:
+                      name = next((child.text or "" for child in layer if local_name(child.tag) == "Name"), "").strip()
+                      title = next((child.text or "" for child in layer if local_name(child.tag) == "Title"), "").strip()
+                      if name:
+                          layers.append((name, title))
+                  print(f"ROOT {label}: {root.tag}; named Layer elements={len(layers)}")
+                  if layers:
+                      print("DISCOVERED LAYERS:")
+                      for name, title in layers:
+                          print(f"  {name} | {title}")
+                      if "mapcache" in base:
+                          import urllib.parse
+                          available = {name for name, _ in layers}
+                          expected = ["ap_hz", "agg_karnataka", "agg_kerala", "agg_tamilnadu"]
+                          for layer_name in expected:
+                              if layer_name not in available:
+                                  print(f"WARN expected South India hazard layer absent from WMS catalogue: {layer_name}")
+                                  continue
+                              params = urllib.parse.urlencode({
+                                  "SERVICE":"WMS","VERSION":"1.1.1","REQUEST":"GetMap",
+                                  "LAYERS":layer_name,"STYLES":"","SRS":"EPSG:4326",
+                                  "BBOX":"73,7,87,22","WIDTH":"128","HEIGHT":"128",
+                                  "FORMAT":"image/png","TRANSPARENT":"TRUE"
+                              })
+                              try:
+                                  map_req = urllib.request.Request(base+"?"+params, headers={"User-Agent":"FloodWatch-source-discovery/1.0"})
+                                  with urllib.request.urlopen(map_req, timeout=18) as map_response:
+                                      image_body = map_response.read()
+                                      content_type = map_response.headers.get("Content-Type","")
+                                  if image_body.startswith(b"\\x89PNG\\r\\n\\x1a\\n") or "image/png" in content_type.lower():
+                                      print(f"PASS WMS GetMap {layer_name}: {len(image_body)} bytes, {content_type}")
+                                  else:
+                                      print(f"WARN WMS GetMap {layer_name}: non-image response {content_type}, {image_body[:100]!r}")
+                              except Exception as map_exc:
+                                  print(f"WARN WMS GetMap {layer_name}: {map_exc}")
+                              # Probe the same Web Mercator projection Leaflet uses by default.
+                              import math
+                              def mercator(lon, lat):
+                                  radius = 6378137.0
+                                  x = radius * math.radians(lon)
+                                  clipped = max(-85.05112878, min(85.05112878, lat))
+                                  y = radius * math.log(math.tan(math.pi/4 + math.radians(clipped)/2))
+                                  return x, y
+                              x0,y0=mercator(73,7); x1,y1=mercator(87,22)
+                              web_params = urllib.parse.urlencode({
+                                  "SERVICE":"WMS","VERSION":"1.1.1","REQUEST":"GetMap",
+                                  "LAYERS":layer_name,"STYLES":"","SRS":"EPSG:3857",
+                                  "BBOX":f"{x0},{y0},{x1},{y1}","WIDTH":"128","HEIGHT":"128",
+                                  "FORMAT":"image/png","TRANSPARENT":"TRUE"
+                              })
+                              try:
+                                  web_req = urllib.request.Request(base+"?"+web_params, headers={"User-Agent":"FloodWatch-source-discovery/1.0"})
+                                  with urllib.request.urlopen(web_req, timeout=18) as web_response:
+                                      web_body = web_response.read()
+                                      web_type = web_response.headers.get("Content-Type","")
+                                  if "image/png" in web_type.lower():
+                                      print(f"PASS Leaflet EPSG:3857 WMS {layer_name}: {len(web_body)} bytes")
+                                  else:
+                                      print(f"WARN Leaflet EPSG:3857 WMS {layer_name}: {web_type}, {web_body[:100]!r}")
+                              except Exception as web_exc:
+                                  print(f"WARN Leaflet EPSG:3857 WMS {layer_name}: {web_exc}")
+                              legend_params = urllib.parse.urlencode({
+                                  "SERVICE":"WMS","VERSION":"1.1.1","REQUEST":"GetLegendGraphic",
+                                  "LAYER":layer_name,"FORMAT":"image/png"
+                              })
+                              try:
+                                  legend_req = urllib.request.Request(base+"?"+legend_params, headers={"User-Agent":"FloodWatch-source-discovery/1.0"})
+                                  with urllib.request.urlopen(legend_req, timeout=18) as legend_response:
+                                      legend_body = legend_response.read()
+                                      legend_type = legend_response.headers.get("Content-Type","")
+                                  if legend_body.startswith(bytes([137,80,78,71,13,10,26,10])) or "image/png" in legend_type.lower():
+                                      print(f"PASS WMS GetLegendGraphic {layer_name}: {len(legend_body)} bytes, {legend_type}")
+                                  else:
+                                      print(f"WARN WMS GetLegendGraphic {layer_name}: non-image response {legend_type}, {legend_body[:100]!r}")
+                              except Exception as legend_exc:
+                                  print(f"WARN WMS GetLegendGraphic {layer_name}: {legend_exc}")
+                  else:
+                      print("WARN no named layer records parsed. XML preview: " + raw[:700].decode("utf-8", errors="replace").replace("\\n", " ") )
+              except Exception as exc:
+                  print(f"WARN {label}: capability request could not be verified ({exc})")
+          # Inspect the official hazard atlas front end for its current map endpoint.
+          import re
+          from html.parser import HTMLParser
+
+          class AssetParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.assets = []
+              def handle_starttag(self, tag, attrs):
+                  a = dict(attrs)
+                  src = a.get("src") or a.get("href")
+                  if src and (tag == "script" or tag == "link"):
+                      self.assets.append((tag, src))
+
+          pages = [
+              ("NRSC Flood Hazard Zones", "https://bhuvan-app1.nrsc.gov.in/disaster/usrtasks/flood_hz/flood_hz.php?uname=empty"),
+              ("NDRF/NRSC Flood Hazard Atlas", "https://ndrf.nrsc.gov.in/hydrological_fhz.php?lang=en"),
+          ]
+          for label, page_url in pages:
+              try:
+                  req = urllib.request.Request(page_url, headers={"User-Agent": "FloodWatch-source-discovery/1.0"})
+                  with urllib.request.urlopen(req, timeout=18) as response:
+                      html = response.read().decode("utf-8", errors="replace")
+                      print(f"PORTAL {label}: HTTP {response.status}, {len(html)} chars")
+                  parser = AssetParser()
+                  parser.feed(html)
+                  for tag, asset in parser.assets:
+                      if any(word in asset.lower() for word in ("js", "map", "flood", "hazard", "arcgis", "geoserver", "api")):
+                          print(f"  ASSET {tag}: {asset}")
+                      if tag == "script" and asset.lower().split("?")[0].endswith(".js"):
+                          from urllib.parse import urljoin
+                          script_url = urljoin(page_url, asset)
+                          try:
+                              script_req = urllib.request.Request(script_url, headers={"User-Agent": "FloodWatch-source-discovery/1.0"})
+                              with urllib.request.urlopen(script_req, timeout=18) as script_response:
+                                  js = script_response.read().decode("utf-8", errors="replace")
+                              print(f"  SCRIPT {script_url}: {len(js)} chars")
+                              hints = [line.strip() for line in js.splitlines()
+                                       if any(word in line.lower() for word in ("wms", "arcgis", "mapserver", "geoserver", "flood_hz", "hazard", "tilelayer", "featurelayer", "map.addlayer", "rest/services", "ajax", ".php", ".json", "layername"))]
+                              for hint in hints[:45]:
+                                  print("    JS-HINT: " + hint[:800])
+                              for token in ("_hz_9815", "hazard.exe", "load_hz", "states_hzm", "Flood Hazard Atlas", "hazard1:VILL_", "loadmap('fldhz'"):
+                                  positions = [m.start() for m in re.finditer(re.escape(token), js, re.I)]
+                                  for pos in positions[:4]:
+                                      print(f"  CONTEXT {token} @ {pos}: " + js[max(0,pos-700):pos+1200].replace("\\n", " ") )
+                          except Exception as js_exc:
+                              print(f"  WARN script fetch {script_url}: {js_exc}")
+                  matches = [line.strip() for line in html.splitlines()
+                             if any(word in line.lower() for word in ("wms", "geoserver", "mapserver", "arcgis", "rest/services", "tilelayer", "featurelayer", "flood_hz", "hazard"))]
+                  for line in matches[:30]:
+                      print("  SOURCE-HINT: " + line[:500])
+              except Exception as exc:
+                  print(f"WARN portal inspection {label}: {exc}")
+          PY
+
+      - name: Check optional live backend API
+        env:
+          BACKEND_BASE_URL: ${{ github.event.inputs.backend_base_url || '' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          base = os.environ.get("BACKEND_BASE_URL", "").strip().rstrip("/")
+          if not base:
+              print("SKIP backend API checks: no manual backend_base_url input was supplied.")
+              raise SystemExit(0)
+
+          parsed = urlsplit(base)
+          if (
+              parsed.scheme != "https"
+              or not parsed.hostname
+              or not parsed.hostname.endswith(".trycloudflare.com")
+              or parsed.username
+              or parsed.password
+              or parsed.port
+              or parsed.path not in ("", "/")
+              or parsed.query
+              or parsed.fragment
+          ):
+              raise SystemExit(
+                  "Invalid backend_base_url. Supply only the current HTTPS Cloudflare Quick Tunnel "
+                  "origin, such as https://example.trycloudflare.com (no path, credentials, port, "
+                  "query, or fragment)."
+              )
+
+          endpoints = {
+              "health": "/health",
+              "status": "/api/v1/status",
+              "weather": "/api/v1/weather?latitude=19.15&longitude=77.30",
+              "river_flow": "/api/v1/river-flow?latitude=19.15&longitude=77.30",
+              "water_observations": "/api/v1/water-observations?limit=5",
+              "model_status": "/api/v1/models/status",
+          }
+          for name, path in endpoints.items():
+              url = base + path
+              request = Request(
+                  url,
+                  headers={"Accept": "application/json", "User-Agent": "FloodWatch-smoke-check/1.0"},
+              )
+              try:
+                  with urlopen(request, timeout=18) as response:
+                      status = response.status
+                      payload = json.loads(response.read().decode("utf-8"))
+              except Exception as exc:
+                  raise SystemExit(f"FAIL backend {name}: {exc}") from exc
+              if status != 200:
+                  raise SystemExit(f"FAIL backend {name}: expected HTTP 200, got {status}")
+              if not isinstance(payload, dict):
+                  raise SystemExit(f"FAIL backend {name}: expected a JSON object")
+              if name == "health" and payload.get("status") != "healthy":
+                  raise SystemExit(f"FAIL backend health: unexpected body {payload}")
+              if name == "weather" and not isinstance(payload.get("current"), dict):
+                  raise SystemExit("FAIL backend weather: current conditions are missing")
+              if name == "water_observations" and not isinstance(payload.get("observations"), list):
+                  raise SystemExit("FAIL backend water-observations: observations array is missing")
+              print(f"PASS backend {name}: HTTP {status}")
+          PY
