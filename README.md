@@ -1,5 +1,7 @@
 # FloodWatch South India
 
+![FloodWatch](assets/floodwatch-thumbnail.png)
+
 ## Flood intelligence at basin scale
 
 South India's rivers can go from calm to catastrophic in hours, and the data needed to see it coming is scattered across a dozen agencies, portals and file formats. **FloodWatch unifies it into one real-time, map-led flood intelligence platform**, fusing live hydrometeorological telemetry, deep-learning discharge forecasting and satellite-derived flood history for the river basins of South India.
