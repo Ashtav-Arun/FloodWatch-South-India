@@ -38,22 +38,19 @@ jobs:
           import urllib.request
 
           checks = [
-              ("site", "https://pantheondeified.github.io/FloodWatch-South-India/"),
-              ("water_snapshot", "https://raw.githubusercontent.com/PantheonDeified/FloodWatch-South-India/main/data/water-observations.json"),
+              ("site", "https://ashtav-arun.github.io/FloodWatch-South-India/"),
+              ("water_snapshot", "https://raw.githubusercontent.com/Ashtav-Arun/FloodWatch-South-India/main/data/water-observations.json"),
           ]
           responses = {}
           # Pages deployment and this smoke-check workflow start on the same push.
           # Retry the page fetch until the new commit is actually visible via GitHub Pages/CDN.
           expected_markers = (
-              "FloodWatch", "leaflet", "water-observations.json",
-              'data-overlay="rain"', 'data-overlay="cloud"',
-              'data-overlay="wind"', 'data-overlay="nasa-imerg"', 'data-overlay="cyclone"',
-              "ERA5-Land", "waterRows", "dischargeInterpretation", "hourly",
-              "riskLayer", "riskMapLegend", "setRiskMapLayer", "setComputedRiskGrid", "FLOODWATCH_RISK_GRID", "fw-risk-contours-20261018-v1", "flood-api.open-meteo.com", "NRSC_HAZARD_WMS",
-              "agg_karnataka", "agg_kerala", "agg_tamilnadu", "loadCyclones",
-              "addRiskCycloneThreat", "buildRiskContourField", "buildRiskContourPolylines", "basinRoutingRelation", "loadSouthIndiaBasins", "checkOfficialFeeds", 'id="regionalMlStatus"', 'id="ibmZDatathonBanner"', "infraEvidenceForm", "initInfrastructureRegister",
-              "floodwatch.infrastructureEvidence.v1", "cwc.gov.in/national-register-large-dams",
-              "sachet.ndma.gov.in",
+              "FloodWatch", "leaflet", "south-india-states.geojson",
+              "api.rainviewer.com", "tilecache.rainviewer.com",
+              "api.open-meteo.com", "flood-api.open-meteo.com", "nominatim.openstreetmap.org",
+              "NRSC_WMS", "agg_karnataka", "agg_kerala", "agg_tamilnadu",
+              "gridCells", "drawContours", "buildField", "humanPoints",
+              'id="infraForm"', 'id="map"', "sachet.ndma.gov.in", "ffs.india-water.gov.in",
           )
           for name, url in checks:
               max_attempts = 10 if name == "site" else 1
