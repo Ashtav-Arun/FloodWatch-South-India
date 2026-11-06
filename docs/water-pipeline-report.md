@@ -1,8 +1,8 @@
 # Water-observation snapshot — automated quality audit
 
-- Snapshot generation timestamp: **2026-11-06T06:41:18.769425+00:00**
-- Records in snapshot: **421**
-- Resource files checked: **37**
+- Snapshot generation timestamp: **2026-11-06T19:23:12.147954+00:00**
+- Records in snapshot: **300**
+- Resource files checked: **27**
 - Report generated from this snapshot by the GitHub Actions pipeline; source records are not modified.
 
 ## Measurement types
@@ -13,7 +13,7 @@
 | Reservoir level | 44 |
 | Reservoir storage | 9 |
 | River discharge | 209 |
-| River level | 151 |
+| River level | 30 |
 
 ## Quality indicators
 
@@ -21,25 +21,21 @@
 |---|---:|---|
 | Missing both coordinates | 34 | Do not plot these records as station points |
 | Missing state | 34 | State coverage cannot be assigned from the record |
-| Labelled outside five core states | 16 | Review geography; do not present as an in-area station by default |
+| Labelled outside five core states | 0 | Review geography; do not present as an in-area station by default |
 | Missing district | 34 | District-level filtering may be incomplete |
-| Source timezone unspecified | 421 | Preserve the reported timestamp; do not assume UTC or local time |
+| Source timezone unspecified | 300 | Preserve the reported timestamp; do not assume UTC or local time |
 | Duplicate station/type/timestamp groups | 0 | Review possible overlap; records are retained in this report |
 
 ## Records by state label
 
 | State label | Records |
 |---|---:|
-| Andhra Pradesh | 103 |
-| Tamil Nadu | 87 |
-| Karnataka | 74 |
-| Telangana | 64 |
-| Kerala | 43 |
+| Tamil Nadu | 58 |
+| Telangana | 57 |
+| Andhra Pradesh | 55 |
+| Karnataka | 55 |
+| Kerala | 41 |
 | Unspecified | 34 |
-| Maharashtra | 10 |
-| Chhattisgarh | 4 |
-| Dadra & Nagar Haveli | 1 |
-| Madhya Pradesh | 1 |
 
 ## Records by configured source
 
@@ -47,9 +43,7 @@
 |---|---:|---:|---|
 | Andhra Pradesh reservoir storage and level | 19 | 2 | 2026-09-30T08:00:00 |
 | Andhra Pradesh river discharge | 2 | 1 | 2026-09-30T08:00:00 |
-| Andhra Pradesh river telemetry | 41 | 4 | 2026-11-05T23:00:00 |
 | Central Water Commission river discharge | 207 | 5 | 2026-11-05T09:15:00 |
-| Central Water Commission river telemetry | 80 | 5 | 2026-11-05T16:30:00 |
 | Flood Flow Canal Head Regulator discharge | 1 | 1 | 2026-08-20T14:00:00 |
 | Kaddam head regulator release/discharge | 1 | 1 | 2026-08-20T14:00:00 |
 | Kakatiya Canal Head Regulator discharge | 1 | 1 | 2026-08-20T15:00:00 |
@@ -68,10 +62,12 @@ These statuses describe what the collector could retrieve during this run; they 
 
 | Configured source page | Status | Resources discovered | Resource scans completed | Resource errors |
 |---|---|---:|---:|---:|
-| Central Water Commission river telemetry | checked | 6 | 6 | 0 |
+| Central Water Commission river telemetry | source_page_error | 0 | 0 | 0 |
 
-- **No usable records — Central Water Commission river telemetry / River Water Level CWC Pennar (2026 - 2030) Telemetry Hourly CSV:** scanned 0 rows without a usable timestamped numeric record
-| Andhra Pradesh river telemetry | checked | 4 | 4 | 0 |
+- **Source-page error — Central Water Commission river telemetry:** HTTPSConnectionPool(host='nwdp.nwic.gov.in', port=443): Max retries exceeded with url: /en/dataset/river-water-level-telemetry-hourly-central-water-commission-cwc (Caused by NameResolutionError("HTTPSConnection(host='nwdp.nwic.gov.in', port=443): Failed to resolve 'nwdp.nwic.gov.in' ([Errno -5] No address associated with hostname)"))
+| Andhra Pradesh river telemetry | source_page_error | 0 | 0 | 0 |
+
+- **Source-page error — Andhra Pradesh river telemetry:** HTTPSConnectionPool(host='nwdp.nwic.gov.in', port=443): Max retries exceeded with url: /dataset/river-water-level-telemetry-hourly-andhra-pradesh-surface-water-department (Caused by NameResolutionError("HTTPSConnection(host='nwdp.nwic.gov.in', port=443): Failed to resolve 'nwdp.nwic.gov.in' ([Errno -5] No address associated with hostname)"))
 | Telangana river telemetry | checked | 2 | 2 | 0 |
 | Kerala river telemetry | checked | 4 | 4 | 0 |
 
@@ -114,7 +110,7 @@ These statuses describe what the collector could retrieve during this run; they 
 | Reservoir level | source-defined | 34 |
 | Reservoir storage | source-defined | 9 |
 | River discharge | m3/s | 209 |
-| River level | m | 151 |
+| River level | m | 30 |
 
 Unit labels such as `source-defined` are intentionally not converted or assumed equivalent. Verify them against the original resource metadata before comparing values across stations.
 
